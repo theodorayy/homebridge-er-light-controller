@@ -1,5 +1,6 @@
 var Service, Characteristic;
 var request = require("request");
+var pollingToEvent = require("polling-to-event");
 
 
 module.exports = function (homebridge) {
@@ -11,6 +12,7 @@ module.exports = function (homebridge) {
 function ERSmartLightAccessory(log, config) {
     this.log = log;
 
+// ==========================================================================================================
     // URL Setup
     this.lights_on_url = config["lights_on_url"];
     this.lights_off_url = config["lights_off_url"];
@@ -18,12 +20,70 @@ function ERSmartLightAccessory(log, config) {
     this.change_light_temperature_url = config["change_light_temperature_url"];
     this.decrease_brightness_url = config["decrease_brightness_url"];
     this.increase_brightness_url = config["increase_brightness_url"];
+    this.brightness_level_url = config["brightness_level_url"];
     this.decrease_colour_temp_url = config["decrease_colour_temp_url"];
     this.increase_colour_temp_url = config["increase_colour_temp_url"];
     this.set_the_mood_url = config["set_the_mood_url"];
     this.set_auto_url = config["set_auto_url"];
+    this.continuous_polling_url = config["continuous_polling_url"];
+    this.desired_brightness_level_url = config["desired_brightness_level_url"];
 
     this.http_method = config["http_method"] || "GET";
+    this.statusPollingInterval = config["statusPollingInterval"] || 500;
+
+// ==========================================================================================================
+
+    // Real-time Polling Status
+    this.lightState = false;
+    this.brightnessLevel = 0.0;
+    this.shutOffControls = false;
+    var accessory = this;
+
+    var realTimePollingURL = this.continuous_polling_url;
+    var eventPoller = pollingToEvent(function (done) {
+        accessory.httpRequest(realTimePollingURL, "", this.http_method, function (error, response, body) {
+            if (error) {
+                accessory.log("Get continuous polling function failed: %s", error.message);
+                try {
+                    done(new Error("Network failure that must not stop homebridge!"));
+                } catch (err) {
+                    accessory.log(err.message);
+                }
+            } else {
+                done(null, body);
+            }
+        })
+    }, { longpolling: true, interval: this.statusPollingInterval, longpollEventName: "eventPoller" });
+
+    eventPoller.on("eventPoller", function(responseBody) {
+        accessory.log("Get live status succeeded!");
+        var jsonResponse = JSON.parse(responseBody);
+        accessory.log(jsonResponse.state);
+        var lightStatus = jsonResponse.state > 0;
+        accessory.log("Light power state is currently: %s", lightStatus);
+        accessory.lightState = lightStatus;
+        accessory.shutOffControls = true;
+        accessory.lightbulbService.getCharacteristic(Characteristic.On)
+        .setValue(accessory.lightState);
+        accessory.shutOffControls = false;
+
+        var brightnessLevel = jsonResponse.brightness;
+        accessory.log("Light brightness level is currently: %s%", brightnessLevel);
+        accessory.brightnessLevel = brightnessLevel;
+
+        accessory.lightbulbService.getCharacteristic(Characteristic.Brightness)
+        .setValue(accessory.brightnessLevel);
+    });
+// ==========================================================================================================
+    // Brightness polling
+    var brightnessLevelPoller = pollingToEvent(function (done) {
+        
+    }, { longpolling: true, interval: this.statusPollingInterval, longpollEventName: "brightnessLevelPoll" });
+
+    eventPoller.on("brightnessLevelPoll", function(responseBody) {
+        
+    });
+// ==========================================================================================================
 }
 
 ERSmartLightAccessory.prototype = {
@@ -37,31 +97,6 @@ ERSmartLightAccessory.prototype = {
             function (error, response, body) {
                 callback(error, response, body)
             })
-    },
-
-    getLightState: function(callback) {
-        if (!this.light_status_url) {
-            this.log.warn("Ignoring request; no light status url defined.");
-            callback(new Error("No status url defined."));
-            return;
-        }
-
-        var url = this.light_status_url;
-        this.log("Getting power state");
-
-        this.httpRequest(url, "", this.http_method, function(error, response, responseBody) {
-            if (error) {
-                this.log("Get light switch status failed: %s", error.message);
-                callback(error);
-            } else {
-                this.log("Get light switch status succeeded!");
-                var jsonResponse = JSON.parse(responseBody);
-                this.log(jsonResponse.state);
-                var lightStatus = jsonResponse.state > 0;
-                this.log("Light power state is currently: %s", lightStatus);
-                callback(null, lightStatus);
-            }
-        }.bind(this));
     },
 
     setLightState: function(isPoweredOn, callback) {
@@ -86,15 +121,23 @@ ERSmartLightAccessory.prototype = {
             this.log("Setting power state to off");
         }
 
-        this.httpRequest(url, body, this.http_method, function(error, response, responseBody) {
-            if (error) {
-                this.log("Light switch function failed: %s", error.message);
-                callback(error);
-            } else {
-                this.log("Light switch function succeeded!");
-                callback();
-            }
-        }.bind(this));
+        if (this.shutOffControls) {
+            callback();
+        } else {
+            this.httpRequest(url, body, this.http_method, function(error, response, responseBody) {
+                if (error) {
+                    this.log("Light switch function failed: %s", error.message);
+                    callback(error);
+                } else {
+                    this.log("Light switch function succeeded!");
+                    callback();
+                }
+            }.bind(this));
+        }
+    },
+
+    setBrightnessLevel: function(callback) {
+        
     },
 
     setColourTemperature: function(callback) {
@@ -122,6 +165,7 @@ ERSmartLightAccessory.prototype = {
     },
 
     getServices: function() {
+        var accessory = this;
         let informationService = new Service.AccessoryInformation();
 
         informationService
@@ -129,14 +173,21 @@ ERSmartLightAccessory.prototype = {
         .setCharacteristic(Characteristic.Model, "66W Remote-Controlled Tri-Colour LED Lights")
         .setCharacteristic(Characteristic.SerialNumber, "000000000001");
 
-        let lightbulbService = new Service.Lightbulb(this.name);
-        lightbulbService
+        this.lightbulbService = new Service.Lightbulb(this.name);
+        this.lightbulbService
         .getCharacteristic(Characteristic.On)
-        .on("get", this.getLightState.bind(this))
+        .on("get", function (callback) {
+            callback(null, accessory.lightState)
+        })
         .on("set", this.setLightState.bind(this));
 
-        this.informationService = informationService;
-        this.lightbulbService = lightbulbService;
-        return [informationService, lightbulbService];
+        // this.lightbulbService
+        // .addCharacteristic(new Characteristic.Brightness())
+        // .on("get", function (callback) {
+        //     callback(null, accessory.currentlevel)
+        // })
+        // .on("set", this.setBrightness.bind(this));
+
+        return [informationService, this.lightbulbService];
     }
 }
