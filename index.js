@@ -159,20 +159,17 @@ ERSmartLightAccessory.prototype = {
         }
     },
 
-    setColourTemperature: function(callback) {
-        var url;
-        var body;
-
+    setColourTemperature: function(colourTemp, callback) {
         if (!this.change_light_temperature_url) {
-            this.log.warn("Ignoring request; No change light colour temperature url defined.");
+            this.log.warn("Ignoring request; no change light colour temperature url defined.");
             callback(new Error("No change light colour temperature url defined."));
             return;
         }
 
-        url = this.change_light_temperature_url;
-        this.log("Changing colour temperature");
+        var url = this.change_light_temperature_url.replace("%b", colourTemp);
+        this.log("Changing colour temperature to %s", colourTemp);
 
-        this.httpRequest(url, body, this.http_method, function (error, response, responseBody) {
+        this.httpRequest(url, "", this.http_method, function (error, response, responseBody) {
             if (error) {
                 this.log("Colour change function failed: %s", error.message);
                 callback(error);
@@ -206,6 +203,10 @@ ERSmartLightAccessory.prototype = {
             callback(null, accessory.brightnessLevel)
         })
         .on("set", this.setBrightnessLevel.bind(this));
+
+        this.lightbulbService
+        .addCharacteristic(new Characteristic.ColorTemperature())
+        .on("set",this.setColourTemperature.bind(this));
 
         return [informationService, this.lightbulbService];
     }
