@@ -10,6 +10,7 @@ module.exports = function (homebridge) {
 };
 
 function ERSmartLightAccessory(log, config) {
+
     this.log = log;
 
 // ==========================================================================================================
@@ -62,7 +63,10 @@ function ERSmartLightAccessory(log, config) {
         var lightStatus = jsonResponse.state > 0;
         accessory.log("Light power state is currently: %s", lightStatus);
         accessory.lightState = lightStatus;
+
+        // Prevent poller from setting state automatically...
         accessory.shutOffControls = true;
+
         accessory.lightbulbService.getCharacteristic(Characteristic.On)
         .setValue(accessory.lightState);
         accessory.shutOffControls = false;
@@ -71,17 +75,10 @@ function ERSmartLightAccessory(log, config) {
         accessory.log("Light brightness level is currently: %s%", brightnessLevel);
         accessory.brightnessLevel = brightnessLevel;
 
+        accessory.shutOffControls = true;
         accessory.lightbulbService.getCharacteristic(Characteristic.Brightness)
         .setValue(accessory.brightnessLevel);
-    });
-// ==========================================================================================================
-    // Brightness polling
-    var brightnessLevelPoller = pollingToEvent(function (done) {
-        
-    }, { longpolling: true, interval: this.statusPollingInterval, longpollEventName: "brightnessLevelPoll" });
-
-    eventPoller.on("brightnessLevelPoll", function(responseBody) {
-        
+        accessory.shutOffControls = false;
     });
 // ==========================================================================================================
 }
@@ -136,8 +133,30 @@ ERSmartLightAccessory.prototype = {
         }
     },
 
-    setBrightnessLevel: function(callback) {
+    setBrightnessLevel: function(brightnessLevel, callback) {
+
+        if (!this.desired_brightness_level_url) {
+            this.log.warn("Ignoring request; no desired brightness level url defined.");
+            callback(new Error("No desired brightness level url defined."));
+            return;
+        }
         
+        var url = this.desired_brightness_level_url.replace("%b", brightnessLevel);
+        this.log("Setting brightness to %s", brightnessLevel);
+
+        if (this.shutOffControls) {
+            callback();
+        } else {
+            this.httpRequest(url, "", this.http_method, function(error, response, responseBody) {
+                if (error) {
+                    this.log("Light desired brightness function failed: %s", error.message);
+                    callback(error);
+                } else {
+                    this.log("Light desired brightness function succeeded!");
+                    callback();
+                }
+            }.bind(this));
+        }
     },
 
     setColourTemperature: function(callback) {
@@ -181,12 +200,12 @@ ERSmartLightAccessory.prototype = {
         })
         .on("set", this.setLightState.bind(this));
 
-        // this.lightbulbService
-        // .addCharacteristic(new Characteristic.Brightness())
-        // .on("get", function (callback) {
-        //     callback(null, accessory.currentlevel)
-        // })
-        // .on("set", this.setBrightness.bind(this));
+        this.lightbulbService
+        .addCharacteristic(new Characteristic.Brightness())
+        .on("get", function (callback) {
+            callback(null, accessory.brightnessLevel)
+        })
+        .on("set", this.setBrightnessLevel.bind(this));
 
         return [informationService, this.lightbulbService];
     }
