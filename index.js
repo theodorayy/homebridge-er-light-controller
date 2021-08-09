@@ -10,7 +10,6 @@ module.exports = function (homebridge) {
 };
 
 function ERSmartLightAccessory(log, config) {
-
     this.log = log;
 
 // ==========================================================================================================
@@ -37,6 +36,8 @@ function ERSmartLightAccessory(log, config) {
     // Real-time Polling Status
     this.lightState = false;
     this.brightnessLevel = 0.0;
+    this.colourTemp = 400;
+    this.autoControlsMode = 1;
     this.shutOffControls = false;
     var accessory = this;
 
@@ -79,12 +80,27 @@ function ERSmartLightAccessory(log, config) {
         accessory.lightbulbService.getCharacteristic(Characteristic.Brightness)
         .setValue(accessory.brightnessLevel);
         accessory.shutOffControls = false;
+
+        var colourTemp = 1000000 / jsonResponse.colour_temp_in_kelvin;
+        accessory.log("Colour temperature is currently: %sK", jsonResponse.colour_temp_in_kelvin);
+        accessory.colourTemp = colourTemp;
+        accessory.shutOffControls = true;
+        accessory.lightbulbService.getCharacteristic(Characteristic.ColorTemperature)
+        .setValue(accessory.colourTemp);
+        accessory.shutOffControls = false;
+
+        var autoControlsMode = jsonResponse.is_manual == "false" ? 1 : 0;
+        accessory.log("is_manual is currently: %s", jsonResponse.is_manual);
+        accessory.autoControlsMode = autoControlsMode;
+        accessory.shutOffControls = true;
+        accessory.switchService.getCharacteristic(Characteristic.On)
+        .setValue(accessory.autoControlsMode);
+        accessory.shutOffControls = false;
     });
 // ==========================================================================================================
 }
 
 ERSmartLightAccessory.prototype = {
-
     httpRequest: function(url, body, method, callback) {
         request({
                 url: url,
@@ -168,16 +184,46 @@ ERSmartLightAccessory.prototype = {
 
         var url = this.change_light_temperature_url.replace("%b", colourTemp);
         this.log("Changing colour temperature to %s", colourTemp);
+        if (this.shutOffControls) {
+            callback();
+        } else {
+            this.httpRequest(url, "", this.http_method, function (error, response, responseBody) {
+                if (error) {
+                    this.log("Colour change function failed: %s", error.message);
+                    callback(error);
+                } else {
+                    this.log("Colour change function succeeded!");
+                    callback();
+                }
+            }.bind(this));
+        }
+    },
 
-        this.httpRequest(url, "", this.http_method, function (error, response, responseBody) {
-            if (error) {
-                this.log("Colour change function failed: %s", error.message);
-                callback(error);
-            } else {
-                this.log("Colour change function succeeded!");
-                callback();
-            }
-        }.bind(this));
+    setAutoMode: function(switchMode, callback) {
+        if (!this.set_auto_url) {
+            this.log.warn("Ignoring request; no auto mode url defined.");
+            callback(new Error("No auto mode url defined."));
+            return;
+        }
+
+        this.log("Auto Mode Switch: ", switchMode == 0 ? "false" : "true");
+
+        var url = this.set_auto_url.replace("%b", switchMode == 0 ? "false" : "true");
+        this.log(url);
+
+        if (this.shutOffControls) {
+            callback();
+        } else {
+            this.httpRequest(url, "", this.http_method, function (error, response, responseBody) {
+                if (error) {
+                    this.log("Set auto mode function failed: %s", error.message);
+                    callback(error);
+                } else {
+                    this.log("Set auto mode function succeeded!");
+                    callback();
+                }
+            }.bind(this));
+        }
     },
 
     getServices: function() {
@@ -206,8 +252,20 @@ ERSmartLightAccessory.prototype = {
 
         this.lightbulbService
         .addCharacteristic(new Characteristic.ColorTemperature())
+        .on("get", function (callback) {
+            callback(null, accessory.colourTemp)
+        })
         .on("set",this.setColourTemperature.bind(this));
 
-        return [informationService, this.lightbulbService];
+        this.switchService = new Service.Switch("Auto Mode");
+        
+        this.switchService
+        .getCharacteristic(Characteristic.On)
+        .on("get", function (callback) {
+            callback(null, accessory.autoControlsMode)
+        })
+        .on("set", this.setAutoMode.bind(this));
+
+        return [informationService, this.lightbulbService, this.switchService];
     }
 }
