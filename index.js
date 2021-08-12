@@ -6,7 +6,8 @@ var pollingToEvent = require("polling-to-event");
 module.exports = function (homebridge) {
     Service = homebridge.hap.Service;
     Characteristic = homebridge.hap.Characteristic;
-    homebridge.registerAccessory("homebridge-er-light-controller", "ER Bedroom Light", ERSmartLightAccessory);
+    homebridge.registerAccessory("homebridge-er-led-light", "ER Smart Light", ERSmartLightAccessory);
+    homebridge.registerAccessory("homebridge-er-auto-mode-toggle", "ER Smart Light Auto Mode Toggle", ERAutoModeToggle);
 };
 
 function ERSmartLightAccessory(log, config) {
@@ -16,15 +17,8 @@ function ERSmartLightAccessory(log, config) {
     // URL Setup
     this.lights_on_url = config["lights_on_url"];
     this.lights_off_url = config["lights_off_url"];
-    this.light_status_url = config["light_status_url"];
     this.change_light_temperature_url = config["change_light_temperature_url"];
-    this.decrease_brightness_url = config["decrease_brightness_url"];
-    this.increase_brightness_url = config["increase_brightness_url"];
     this.brightness_level_url = config["brightness_level_url"];
-    this.decrease_colour_temp_url = config["decrease_colour_temp_url"];
-    this.increase_colour_temp_url = config["increase_colour_temp_url"];
-    this.set_the_mood_url = config["set_the_mood_url"];
-    this.set_auto_url = config["set_auto_url"];
     this.continuous_polling_url = config["continuous_polling_url"];
     this.desired_brightness_level_url = config["desired_brightness_level_url"];
 
@@ -37,7 +31,6 @@ function ERSmartLightAccessory(log, config) {
     this.lightState = false;
     this.brightnessLevel = 0.0;
     this.colourTemp = 400;
-    this.autoControlsMode = 1;
     this.shutOffControls = false;
     var accessory = this;
 
@@ -87,14 +80,6 @@ function ERSmartLightAccessory(log, config) {
         accessory.shutOffControls = true;
         accessory.lightbulbService.getCharacteristic(Characteristic.ColorTemperature)
         .setValue(accessory.colourTemp);
-        accessory.shutOffControls = false;
-
-        var autoControlsMode = jsonResponse.is_manual == "false" ? 1 : 0;
-        accessory.log("is_manual is currently: %s", jsonResponse.is_manual);
-        accessory.autoControlsMode = autoControlsMode;
-        accessory.shutOffControls = true;
-        accessory.switchService.getCharacteristic(Characteristic.On)
-        .setValue(accessory.autoControlsMode);
         accessory.shutOffControls = false;
     });
 // ==========================================================================================================
@@ -199,6 +184,102 @@ ERSmartLightAccessory.prototype = {
         }
     },
 
+    getServices: function() {
+        var accessory = this;
+        let informationService = new Service.AccessoryInformation();
+
+        informationService
+        .setCharacteristic(Characteristic.Manufacturer, "Unknown Chinese manufacturer")
+        .setCharacteristic(Characteristic.Model, "66W Remote-Controlled Tri-Colour LED Lights")
+        .setCharacteristic(Characteristic.SerialNumber, "000000000001");
+
+        this.lightbulbService = new Service.Lightbulb(this.name);
+        this.lightbulbService
+        .getCharacteristic(Characteristic.On)
+        .on("get", function (callback) {
+            callback(null, accessory.lightState)
+        })
+        .on("set", this.setLightState.bind(this));
+
+        this.lightbulbService
+        .addCharacteristic(new Characteristic.Brightness())
+        .on("get", function (callback) {
+            callback(null, accessory.brightnessLevel)
+        })
+        .on("set", this.setBrightnessLevel.bind(this));
+
+        this.lightbulbService
+        .addCharacteristic(new Characteristic.ColorTemperature())
+        .on("get", function (callback) {
+            callback(null, accessory.colourTemp)
+        })
+        .on("set",this.setColourTemperature.bind(this));
+
+        return [informationService, this.lightbulbService];
+    }
+}
+
+function ERAutoModeToggle(log, config) {
+    this.log = log;
+
+    // ==========================================================================================================
+    // URL Setup
+    this.set_auto_url = config["set_auto_url"];
+    this.continuous_polling_url = config["continuous_polling_url"];
+
+    this.http_method = config["http_method"] || "GET";
+    this.statusPollingInterval = config["statusPollingInterval"] || 500;
+
+    // ==========================================================================================================
+    // Real-time Polling Status
+    this.autoControlsMode = 1;
+    this.shutOffControls = false;
+    var accessory = this;
+
+    var realTimePollingURL = this.continuous_polling_url;
+
+    var eventPoller = pollingToEvent(function (done) {
+        accessory.httpRequest(realTimePollingURL, "", this.http_method, function (error, response, body) {
+            if (error) {
+                accessory.log("Get continuous polling function failed: %s", error.message);
+                try {
+                    done(new Error("Network failure that must not stop homebridge!"));
+                } catch (err) {
+                    accessory.log(err.message);
+                }
+            } else {
+                done(null, body);
+            }
+        })
+    }, { longpolling: true, interval: this.statusPollingInterval, longpollEventName: "eventPoller" });
+
+    eventPoller.on("eventPoller", function(responseBody) {
+        accessory.log("Get live status succeeded!");
+        var jsonResponse = JSON.parse(responseBody);
+
+        var autoControlsMode = jsonResponse.is_manual == "false" ? 1 : 0;
+        accessory.log("is_manual is currently: %s", jsonResponse.is_manual);
+        accessory.autoControlsMode = autoControlsMode;
+        accessory.shutOffControls = true;
+        accessory.switchService.getCharacteristic(Characteristic.On)
+        .setValue(accessory.autoControlsMode);
+        accessory.shutOffControls = false;
+    });
+
+}
+
+ERAutoModeToggle.prototype = {
+    httpRequest: function(url, body, method, callback) {
+        request({
+                url: url,
+                body: body,
+                method: method,
+            },
+            function (error, response, body) {
+                callback(error, response, body)
+            })
+    },
+
     setAutoMode: function(switchMode, callback) {
         if (!this.set_auto_url) {
             this.log.warn("Ignoring request; no auto mode url defined.");
@@ -231,34 +312,12 @@ ERSmartLightAccessory.prototype = {
         let informationService = new Service.AccessoryInformation();
 
         informationService
-        .setCharacteristic(Characteristic.Manufacturer, "Unknown Chinese manufacturer")
-        .setCharacteristic(Characteristic.Model, "66W Remote-Controlled Tri-Colour LED Lights")
+        .setCharacteristic(Characteristic.Manufacturer, "Emmanuel Rayendra")
+        .setCharacteristic(Characteristic.Model, "Auto Mode Switch Toggle")
         .setCharacteristic(Characteristic.SerialNumber, "000000000001");
 
-        this.lightbulbService = new Service.Lightbulb(this.name);
-        this.lightbulbService
-        .getCharacteristic(Characteristic.On)
-        .on("get", function (callback) {
-            callback(null, accessory.lightState)
-        })
-        .on("set", this.setLightState.bind(this));
-
-        this.lightbulbService
-        .addCharacteristic(new Characteristic.Brightness())
-        .on("get", function (callback) {
-            callback(null, accessory.brightnessLevel)
-        })
-        .on("set", this.setBrightnessLevel.bind(this));
-
-        this.lightbulbService
-        .addCharacteristic(new Characteristic.ColorTemperature())
-        .on("get", function (callback) {
-            callback(null, accessory.colourTemp)
-        })
-        .on("set",this.setColourTemperature.bind(this));
-
-        this.switchService = new Service.Switch("Auto Mode");
-        
+        this.switchService = new Service.Switch("Auto Lights Control");
+    
         this.switchService
         .getCharacteristic(Characteristic.On)
         .on("get", function (callback) {
@@ -266,6 +325,6 @@ ERSmartLightAccessory.prototype = {
         })
         .on("set", this.setAutoMode.bind(this));
 
-        return [informationService, this.lightbulbService, this.switchService];
+        return [informationService, this.switchService];
     }
 }
